@@ -1,0 +1,546 @@
+---
+title: "Project1.Recomendation.pdf"
+author: "Lubna"
+date: "9/10/2021"
+output: pdf_document
+---
+```{r}
+library(tidyverse)
+library(dslabs)
+library(ggplot2)
+library(lubridate) ## used to deal with timestamp
+library(knitr)
+library(rmarkdown)
+library(lubridate)
+library(stringr)
+library(recosystem)
+library(kableExtra)
+library(tinytex)
+library(caret)
+library(data.table)
+install.packages("recosystem")
+```
+
+```{r}
+##########################################################
+# Create edx set, validation set (final hold-out test set)
+##########################################################
+
+# Note: this process could take a couple of minutes
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+head(movielens)
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+```{r}
+# Exploratory Data Analysis EDA (Quiz)
+#Q1 How many rows and columns are there in the edx dataset?
+dim(edx)
+```
+```{r}
+#Q2 How many zeros & threes were given as ratings in the edx dataset?
+edx %>% summarise(zeroes = sum(rating == "0"))
+edx %>% summarise(threes = sum(rating == "3"))
+```
+
+```{r}
+#Q3 How many different movies are in the edx dataset?
+edx %>% distinct(movieId)
+
+#or
+unique(edx$movieId) %>%
+   length()
+```
+```{r}
+#Q4 How many different users are in the edx dataset?
+   edx %>% distinct(userId)
+```
+```{r}
+#Q5 How many movie ratings are in each of 
+#the following genres in the edx dataset?
+# calculate the number of movies per each genres
+genres <- c("Drama", "Comedy", "Thriller", "Romance")
+sapply(genres, function(g) {
+  sum(str_detect(edx$genres, g))
+})
+
+edx %>% separate_rows(genres, sep = "\\|") %>%
+  group_by(genres) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count))
+
+#Q6 Which movie has the greatest number of ratings?
+edx %>% group_by(title, movieId) %>%
+  summarise(n = n())%>%
+  arrange(desc(n))
+
+#Q7 What are the five most given ratings in order from most to least?
+edx %>% group_by(rating) %>%
+  summarize(n = n()) %>% 
+  arrange(desc(rating))%>%
+  top_n(rating)
+
+
+#Q8 half star ratings are less common than whole star ratings?
+edx %>%
+  group_by(rating) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x = rating, y = count)) +
+  geom_line()
+
+```
+
+```{r}
+#########################################
+# Data Analysis & overview
+# 1: show how many col. & its names
+str(movielens)
+colnames(movielens)
+## edx data set 
+summary_of_edx <- data.frame(rows_number = nrow(edx),
+                             columns_number = ncol(edx),
+                             users_number= distinct(edx$userId),
+                             movies_number = distinct(edx$movieId),
+                             average_rating = round(mean(edx$rating),3),
+                             genres_number = distinct(edx$genres),
+                             first_rating_Date = as.Date(as.POSIXct(min(edx$timestamp), origin = "1970-01-01")),
+                             last_rating_date = as.Date(as.POSIXct(max(edx$timestamp), origin = "1970-01-01")))
+glimpse(summary_of_edx)
+## Validation data set
+summary_of_validation <- data.frame(rows_number = nrow(validation),
+                                    columns_number = ncol(validation),
+                                    users_number=distinct(validation$userId),
+                                    movies_number = distinct(validation$movieId),
+                                    average_rating = round(mean(validation$rating),3),
+                                    genres_number = distinct(validation$genres),
+                                    first_rating_Date = as.Date(as.POSIXct(min(validation$timestamp), origin = "1970-01-01")),
+                                    last_rating_date = as.Date(as.POSIXct(max(validation$timestamp), origin = "1970-01-01")))
+
+glimpse(summary_of_validation)
+```
+```{r}
+## Data pre processing & Exploration
+# 1: Rating Exploration
+rating_mu <- mean(edx$rating)
+
+edx %>%
+  ggplot(aes(x =rating))+
+  geom_histogram( bins = 40, color = "steel blue" ,fill = "steel blue") +
+  coord_flip()+
+  scale_x_continuous(breaks=seq(0, 5, by= 0.5)) +
+  ggtitle("Overall ratings distribution")+
+  labs(x="Rating" ,caption = "Figure 1: Overall ratings in Edx dataset")
+```
+
+```{r}
+## 2 : Movie Exploration
+# movie by number of ratings
+movie_mu <- edx %>% group_by(movieId) %>%
+  summarize(num_movie_rating = n(), 
+            mu_movies = mean(rating),
+            sd_movies = sd(rating)) 
+movie_mu %>% ggplot(aes(x = num_movie_rating))+
+  geom_histogram(bins = 40, color = "steel blue")+
+  scale_x_log10()+
+  ggtitle("Number of ratings by movie") +
+  labs(x="Number of Movies",
+       y="Number of ratings" , 
+       caption ="Figure 2: Number of ratings by movies in Edx Dataset") +
+  geom_vline(aes(xintercept = mean(num_movie_rating)), color = "orange")
+```
+
+```{r}
+# Movie by avg.rating
+edx %>% group_by(movieId) %>%
+  summarize(movie_avg_rating = sum(rating)/n(), 
+            mu_movies = mean(rating),
+            sd_movies = sd(rating)) %>%
+  ggplot(aes(x = movie_avg_rating))+
+  geom_histogram(bins = 40, color = "steel blue")+
+  scale_x_log10()+
+  ggtitle("Movie by avg. rating") +
+  labs(x="Number of Movies",
+       y="Average of ratings" , 
+       caption ="Figure 3: Movies Ditribution by avg. rating in Edx Dataset") +
+  geom_vline(aes(xintercept = mean(movie_avg_rating)), color = "orange")  
+```
+
+```{r}
+## 3: User Exploration
+# User by number of ratings
+edx %>% group_by(userId) %>%
+  summarize(num_user_rated = n(),
+            mu_user = mean(rating),
+            sd_user = sd(rating)) %>% 
+  ggplot(aes(x = num_user_rated))+
+  geom_histogram(bins = 40, color = "green")+
+  scale_x_log10()+
+  ggtitle("Number of ratings by users ") +
+  labs(x = "Number of Users",
+       y = "Number of rating",  
+       caption = "Figure 4: Number of ratings by users in Edx Dataset")+
+  geom_vline(aes(xintercept = mean(num_user_rated)), color = "orange")
+```
+
+```{r}
+# Users by avg. rating
+edx %>% group_by(userId) %>%
+  summarize(user_avg_rating = sum(rating)/n(), 
+            mu_movies = mean(rating),
+            sd_movies = sd(rating)) %>%
+  ggplot(aes(x = user_avg_rating))+
+  geom_histogram(bins = 40, color = "steel blue")+
+  scale_x_log10()+
+  ggtitle("Movie by avg. rating") +
+  labs(x="Number of Movies",
+       y="Average of ratings" , 
+       caption ="Figure 5: Users Ditribution by avg. rating in Edx Dataset") +
+  geom_vline(aes(xintercept = mean(user_avg_rating)), color = "orange")  
+```
+
+```{r}
+## 4 : Time effect
+# Time by avg. ratings
+edx %>% 
+  mutate(date = round_date(as_datetime(timestamp), unit = "month")) %>%
+  group_by(date) %>%
+  summarize(rating = mean(rating)) %>%
+  ggplot(aes(date, rating)) +
+  geom_point() +
+  geom_smooth(color = "green") +
+  ggtitle("average of ratings by Time ") +
+  labs(x = "Time, unit: month ",
+       y = "Mean Rating",  
+       caption = "Figure 6: Average ratings by time/month in Edx Dataset")
+```
+
+```{r}
+## 5: Genres effect by No. ratings
+genres0 <- edx %>% separate_rows(genres, sep = "\\|") %>%
+  group_by(genres) %>%
+  summarize( genres_num_rating = n(), avg_rating_per_genres = mean(rating)) %>%
+  arrange(desc(genres_num_rating))
+
+genres0 %>%
+  ggplot(aes(genres_num_rating,reorder(genres,genres_num_rating), 
+             fill= genres_num_rating)) +
+  geom_bar(stat = "identity") + coord_flip() +
+  ggtitle("Genre by No. of ratings") +
+  labs(y = "Genres Type",
+       x = "Number of ratings",  
+       caption = "Figure 7: Number ratings by genre in Edx Dataset")
+## Genres by avg. avg. rating
+genres0 %>%
+  ggplot(aes(avg_rating_per_genres,reorder(genres,avg_rating_per_genres), 
+             fill= avg_rating_per_genres)) +
+  geom_bar(stat = "identity") + coord_flip() +
+  ggtitle("Genre by No. of ratings") +
+  labs(y = "Genres Type",
+       x = "Number of ratings",  
+       caption = "Figure 8: Genres Ditribution by Avg.rating in Edx Dataset")
+```
+
+```{r}
+######################################################
+######################################################
+# 3: Methods/Models
+######################################################
+#### Simple Bias ######
+#### Model 1: Average rating method 
+mu <- mean(edx$rating)
+
+## predict all unknown ratings with mu and calculate the RMSE
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings-predicted_ratings)^2,na.rm=T))
+}
+rmse_1 <- RMSE(validation$rating, mu)
+```
+
+```{r}
+####
+#### Model 2: Movie effect method
+b_movie <- edx %>% 
+  group_by(movieId)%>%
+  summarise(b_moviee =mean(rating - mu))
+## predict all unknown ratings with mu and b_movie
+predicted_ratings0 <- 
+  mu+ validation %>% 
+  left_join(b_movie, by = "movieId") %>%
+  mutate(pred = mu + b_moviee) %>%
+  pull(b_moviee)
+## output RMSE of these predictions
+rmse_2 <- RMSE(validation$rating,predicted_ratings0)
+
+## plot the distribution of b_movie's
+qplot(b_moviee, data = b_movie, bins = 10, color = I("black"))
+```
+
+```{r}
+#####
+#### Model 3: Movie & user effect method
+b_user <- edx %>%
+  left_join(b_movie, by="movieId")%>%
+  group_by(userId)%>%
+  summarize(b_userr = mean(rating - b_moviee - mu))
+## predict all unknown ratings with mu and b_movie and b_user
+predicted_ratings <- 
+  validation %>% 
+  left_join(b_movie, by = "movieId") %>%
+  left_join(b_user, by = "userId") %>%
+  mutate(pred = mu + b_moviee + b_userr) %>%
+  pull(pred)
+## output RMSE of these predictions
+rmse_3 <- RMSE(validation$rating, predicted_ratings)
+```
+
+```{r}
+#################################################
+#### Model 4: Regularized Bias ##########
+#Movie effect method using k foldation =10 
+set.seed(2019, sample.kind = "Rounding")
+cv_splits <- createFolds(edx$rating, k=10, returnTrain =TRUE)
+
+# define a matrix to store the results of cross validation
+lambdas <- seq(0, 10, 0.25)
+rmses <- matrix(nrow=10,ncol=51)
+
+# perform 10-fold cross validation to determine the optimal lambda
+for(k in 1:10) {
+  train_set <- edx[cv_splits[[k]],]
+  test_set <- edx[-cv_splits[[k]],]
+  
+  # Make sure userId and movieId in test set are also in the train set
+  test_final <- test_set %>% 
+    semi_join(train_set, by = "movieId") %>%
+    semi_join(train_set, by = "userId")
+  
+  # Add rows removed from validation set back into edx set
+  removed <- anti_join(test_set, test_final)
+  train_final <- rbind(train_set, removed)
+  
+  mu <- mean(train_final$rating)
+  b_movies <- train_final %>% 
+    group_by(movieId) %>% 
+    summarize(s = sum(rating - mu), n_i = n())
+  
+  rmses[k,] <- sapply(lambdas, function(l){
+    predicted_ratings <- test_final %>% 
+      left_join(b_movies, by='movieId') %>% 
+      mutate(b_moviee1 = s/(n_i+l)) %>%
+      mutate(pred = mu + b_moviee1) %>%
+      pull(pred)
+    return(RMSE(predicted_ratings, test_final$rating))
+  })
+}
+
+rmses_cv <- colMeans(rmses)
+qplot(lambdas,rmses_cv)
+lambda <- lambdas[which.min(rmses_cv)]   
+lambda #  3
+
+## Adjust mean by movie effect 
+b_movie1 <- edx %>% 
+  group_by(movieId)%>%
+  summarise(b_moviee1 =sum(rating - mu)/ (n()+lambda),  n_i = n())
+                  
+predicted_ratings_1 <- validation %>% 
+  left_join(b_movie1, by = "movieId") %>%
+  mutate(pred = mu + b_moviee1) %>%
+  pull(pred)
+
+rmse_4 <- RMSE(predicted_ratings_1, validation$rating)
+
+```
+
+```{r}
+#########################################
+#### Model 5: Regularized Movie & user effect method
+# define a matrix to store the results of cross validation
+lambdas <- seq(0, 8, 0.1)
+rmses_1 <- matrix(nrow=10,ncol=length(lambdas))
+# perform 10-fold cross validation to determine the optimal lambda
+for(k in 1:10) {
+  train_set <- edx[cv_splits[[k]],]
+  test_set <- edx[-cv_splits[[k]],]
+  
+  # Make sure userId and movieId in test set are also in the train set
+  test_final <- test_set %>% 
+    semi_join(train_set, by = "movieId") %>%
+    semi_join(train_set, by = "userId")
+  
+  # Add rows removed from validation set back into edx set
+  removed <- anti_join(test_set, test_final)
+  train_final <- rbind(train_set, removed)
+  
+  mu <- mean(train_final$rating)
+  
+  rmses_1[k,] <- sapply(lambdas, function(l){
+    b_i <- train_final %>% 
+      group_by(movieId) %>%
+      summarize(b_i = sum(rating - mu)/(n()+l))
+    b_u <- train_final %>% 
+      left_join(b_i, by="movieId") %>%
+      group_by(userId) %>%
+      summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+    predicted_ratings <- 
+      test_final %>% 
+      left_join(b_i, by = "movieId") %>%
+      left_join(b_u, by = "userId") %>%
+      mutate(pred = mu + b_i + b_u) %>%
+      pull(pred)
+    return(RMSE(predicted_ratings, test_final$rating))
+  })
+}
+
+rmses_1
+rmses_1_cv <- colMeans(rmses_1)
+rmses_1_cv
+qplot(lambdas,rmses_1_cv)
+lambda <- lambdas[which.min(rmses_1_cv)]   
+lambda # 3.7
+
+##  Adjust mean by movie & users effect
+mu <- mean(edx$rating)
+b_i_reg <- edx %>% 
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - mu)/(n()+lambda))
+b_u_reg <- edx %>% 
+  left_join(b_i_reg, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - b_i - mu)/(n()+lambda))
+predicted_ratings_01 <- 
+  validation %>% 
+  left_join(b_i_reg, by = "movieId") %>%
+  left_join(b_u_reg, by = "userId") %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+
+rmse_5 <- RMSE(predicted_ratings_01, validation$rating) 
+```
+
+```{r}
+######################################################
+# Final model 6: Matrix factorization for regularized movie and user effects
+######################################################
+lambda <- 3.7
+mu <- mean(edx$rating)
+b_i_reg <- edx %>% 
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - mu)/(n()+lambda))
+b_u_reg <- edx %>% 
+  left_join(b_i_reg, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - b_i - mu)/(n()+lambda))
+predicted_ratings_edx <- 
+  edx %>% 
+  left_join(b_i_reg, by = "movieId") %>%
+  left_join(b_u_reg, by = "userId") %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+model_rmse_edx <- RMSE(predicted_ratings_edx, edx$rating)
+model_rmse_edx # 0.8351036
+
+# find residuals :matrix factorization for model which has minimum RMSE;
+# is Regularization movies and users effect
+
+edx_residual <- edx %>% 
+  left_join(b_i_reg, by = "movieId") %>%
+  left_join(b_u_reg, by = "userId") %>%
+  mutate(residual = rating - mu - b_i - b_u) %>%
+  select(userId, movieId, residual)
+head(edx_residual)
+
+#######  Use the recosystem package to perform the matrix factorization
+## make matrix from residual and validation set
+final_residual_mf <- as.matrix(edx_residual)
+validation_mf <- validation %>% 
+  select(userId, movieId, rating)
+validation_mf <- as.matrix(validation_mf)
+
+## write final_residual_mf and validation_mf table on disk
+write.table(final_residual_mf , file = "final_trainset.txt" , sep = " " , row.names = FALSE, col.names = FALSE)
+write.table(validation_mf, file = "final_testset.txt" , sep = " " , row.names = FALSE, col.names = FALSE)
+
+# training the recommended model
+set.seed(2019) 
+train_set <- data_file("trainset.txt")
+valid_set <- data_file("validset.txt")
+
+# build a recommender object
+r <- Reco()
+
+# tuning training set
+opts <- r$tune(train_set, opts = list(dim = c(10, 20, 30), lrate = c(0.1, 0.2),
+                                      costp_l1 = 0, costq_l1 = 0,
+                                      nthread = 1, niter = 10))
+opts
+r$train(train_set, opts = c(opts$min, nthread = 1, niter = 20))
+
+# Making prediction on validation set and calculating RMSE:
+pred_file <- tempfile()
+r$predict(valid_set, out_file(pred_file))  
+predicted_residuals_mf <- scan(pred_file)
+predicted_ratings_mf <- predicted_ratings_6 + predicted_residuals_mf
+rmse_mf <- RMSE(predicted_ratings_mf,validation$rating) # 0.786256
+```
+
+```{r}
+############
+# table with six models & its rmse 
+bind_rows(data.frame(Model= "Average rating", RMSE = rmse_1),
+          data.frame(Model = "Movie effect method", RMSE = rmse_2),
+          data.frame(Model = "Movie & user effect method", RMSE = rmse_3),
+          data.frame(Model = "Regularized Movie effect method",
+                     RMSE = rmse_4),
+          data.frame(Model = "Regularized Movie & user effect method",
+                     RMSE = rmse_5),
+          data_frame(Model="Matrix Factorization",  
+                     RMSE = rmse_mf))
+# best model is No. 6 "matrix factorization" gets the minimum RMSE
+```
+
+
+
+
